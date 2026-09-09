@@ -1,0 +1,60 @@
+// tests/embedded_probe.nv — the package's device claim, as a program
+// that either builds for a Cortex-M or does not.
+//
+// The shard audit's `core-embedded` row copies this and the modules its
+// `use` lines reach into a package of their own and runs
+//
+//   novo build --target=nrf52-qemu src/probe.nv
+//
+// which produces a real Cortex-M4 ELF or fails.  For an HCI codec the
+// claim is the whole point: the same deframer runs in a controller's
+// UART interrupt handler and in a host tool on a laptop, and a codec
+// that could not compile for the first would not be worth splitting out
+// of the stack.
+//
+// It BUILDS; it does not run.  Every function it calls is a `todo()`
+// today, so a device that executed this would panic on the first line
+// of `main`.  What is being checked is the tier: `--target=nrf52-qemu`
+// stamps `@tier(embedded)` on every function it compiles, so the
+// checker walks the module and refuses a `Str` concatenation, a `Bytes`
+// call or an unbounded `while` wherever the implementation later puts
+// one.
+//
+// `drain` is deliberately not called here.  It is generic, so calling
+// it would specialise it, and a specialised effect-polymorphic function
+// does not compile today
+// (`effect-polymorphic-fn-loses-its-bound-when-monomorphised-across-modules`).
+// The byte-at-a-time path below is what an interrupt handler would use
+// anyway.
+
+use hci_codec
+
+fn main() [hw]
+    // The framing arithmetic, which is what a controller's receive path
+    // spends its time in.
+    let framed = hci_codec.h4_frame(HciCommand, [0x03 as u8, 0x0C as u8, 0x00 as u8])
+    match hci_codec.h4_scan(framed)
+        NeedMore    => hal.uart.write("hci-codec-nv: partial\n")
+        Resync      => hal.uart.write("hci-codec-nv: resync\n")
+        Complete(_) => hal.uart.write("hci-codec-nv: whole packet\n")
+
+    // The deframer, driven one byte at a time — the shape an interrupt
+    // handler has, with nothing allocated to pass a byte.
+    var d: Deframer = hci_codec.deframer()
+    for i in 0..4
+        let step: DeframeStep = hci_codec.feed_byte(d, framed[i] as Int)
+        d = step.deframer
+        match step.packet
+            None    => hal.uart.write(".")
+            Some(_) => hal.uart.write("!")
+
+    // And one decode, so the Result-returning half of the surface is
+    // compiled for the device too rather than only the total functions.
+    let p: Result<Packet, DecodeError> = hci_codec.decode(framed)
+    match p
+        Err(_)  => hal.uart.write("hci-codec-nv: bad packet\n")
+        Ok(pkt) =>
+            match pkt
+                Cmd(_) => hal.uart.write("hci-codec-nv: command\n")
+                Evt(_) => hal.uart.write("hci-codec-nv: event\n")
+                Acl(_) => hal.uart.write("hci-codec-nv: acl\n")

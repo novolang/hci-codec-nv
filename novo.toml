@@ -1,0 +1,32 @@
+[package]
+name        = "hci-codec-nv"
+version     = "0.0.1"
+description = "The Bluetooth HCI packet codec with no radio attached: commands, events and ACL data to and from bytes, H4 framing, and a feed-and-drain deframer for a byte stream that does not arrive in packets.  Interface only — every body is a todo()."
+license     = "Apache-2.0"
+
+# An INTERFACE release: every `pub fn` body is a `todo()`, so the
+# signatures and the effect rows are published and nothing is
+# implemented.  `novo pkg publish` recognises the shape and requires
+# both the draft stability and the 0.0.x version; the first
+# implementation is the 0.1.0 published over it.
+stability   = "draft"
+
+# `core`: bytes in, packets out, and no transport.  The one function
+# with a row — `drain` — binds its trait's effect parameter rather than
+# naming an effect, so it costs whatever the caller's source costs and
+# the package's own budget stays empty (SPEC § 5.6).
+layer       = "core"
+
+category    = "networking"
+
+tags        = ["bluetooth", "ble", "hci", "h4", "codec", "deframer", "sans-io", "acl", "embedded"]
+repository  = "https://github.com/novolang/hci-codec-nv"
+maintainers = ["novo-lang"]
+
+[docs.pages]
+"README.md" = "HCI packets, without a radio"
+
+[dependencies]
+# None.  A codec over `[u8]` needs the language and nothing else, which
+# is the property that lets it sit under both a host stack and a
+# controller.

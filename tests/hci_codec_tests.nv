@@ -1,0 +1,229 @@
+// tests/hci_codec_tests.nv — the API tests, written against the
+// signatures.
+//
+// They COMPILE today and they FAIL at run, with `not implemented:
+// hci_codec.<fn>` from the `todo()` that is each body.  That is the
+// expected state of an interface release: the compiler has checked
+// every signature, every type and every effect row, and nothing else
+// has been checked because there is nothing else yet.
+//
+// One test that belongs here is absent, and the block at the bottom of
+// the file says which and why: the claim that `drain`'s `[e]` resolves
+// to nothing against a pure impl cannot be written down today, for a
+// toolchain defect filed from this lane.
+
+use std.test
+use hci_codec
+
+// A byte source that is a list and an index — the pure impl the effect
+// parameter exists to be checked against.
+struct Captured
+    bytes: [u8]
+    at: Int
+
+impl ByteSource[] for Captured
+    fn read_byte(self) -> ?Int
+        if self.at >= list.len(self.bytes)
+            return None
+        Some(self.bytes[self.at] as Int)
+
+// HCI_Reset framed for H4: type 0x01, opcode 0x0C03, no parameters.
+fn reset_framed() -> [u8]
+    [0x01 as u8, 0x03 as u8, 0x0C as u8, 0x00 as u8]
+
+@test
+fn test_the_opcode_groups_are_the_specification_s()
+    // Real today: the constants are the one part of an interface that
+    // needs no body.
+    test.assert_eq(hci_codec.OGF_LINK_CONTROL, 0x01)
+    test.assert_eq(hci_codec.OGF_CONTROLLER_BASEBAND, 0x03)
+    test.assert_eq(hci_codec.OGF_LE_CONTROLLER, 0x08)
+    test.assert_eq(hci_codec.OGF_VENDOR_SPECIFIC, 0x3F)
+    test.assert_eq(hci_codec.EVT_COMMAND_COMPLETE, 0x0E)
+    test.assert_eq(hci_codec.EVT_LE_META_EVENT, 0x3E)
+
+@test
+fn test_an_opcode_packs_and_unpacks()
+    // HCI_Reset is OGF 0x03, OCF 0x003 → 0x0C03.
+    let op = hci_codec.opcode(0x03, 0x003)
+    test.assert_eq(op, 0x0C03)
+    test.assert_eq(hci_codec.opcode_ogf(op), 0x03)
+    test.assert_eq(hci_codec.opcode_ocf(op), 0x003)
+
+@test
+fn test_the_h4_type_byte_round_trips()
+    let b = hci_codec.h4_type_byte(HciCommand)
+    test.assert_eq(b, 0x01)
+    match hci_codec.h4_packet_type(b)
+        None    => test.fail("0x01 names the command layer")
+        Some(k) =>
+            match k
+                HciCommand => test.assert(true)
+                _          => test.fail("0x01 is HciCommand and nothing else")
+
+@test
+fn test_a_byte_that_names_no_layer_is_none()
+    match hci_codec.h4_packet_type(0x77)
+        None    => test.assert(true)
+        Some(_) => test.fail("0x77 is not an H4 packet type")
+
+@test
+fn test_framing_prepends_the_type_byte()
+    let framed = hci_codec.h4_frame(HciCommand, [0x03 as u8, 0x0C as u8, 0x00 as u8])
+    test.assert_eq(list.len(framed), 4)
+    test.assert_eq(framed[0] as Int, 0x01)
+
+@test
+fn test_a_scan_of_a_whole_packet_gives_its_length()
+    match hci_codec.h4_scan(reset_framed())
+        NeedMore    => test.fail("four bytes are the whole of a reset")
+        Resync      => test.fail("0x01 is a legal type byte")
+        Complete(n) => test.assert_eq(n, 4)
+
+@test
+fn test_a_scan_of_a_prefix_asks_for_more()
+    match hci_codec.h4_scan([0x01 as u8, 0x03 as u8])
+        NeedMore    => test.assert(true)
+        Resync      => test.fail("0x01 is a legal type byte")
+        Complete(_) => test.fail("two bytes cannot be a whole command")
+
+@test
+fn test_a_scan_of_a_bad_type_byte_asks_to_resync()
+    match hci_codec.h4_scan([0x77 as u8, 0x00 as u8])
+        NeedMore    => test.fail("no length rule applies to 0x77")
+        Resync      => test.assert(true)
+        Complete(_) => test.fail("0x77 begins no packet")
+
+@test
+fn test_a_command_round_trips_through_its_wire_bytes()
+    let cmd = HciCommand { opcode: 0x0C03, params: [] }
+    let wire = hci_codec.encode_command(cmd)
+    // Two opcode bytes little-endian, then the parameter length.
+    test.assert_eq(list.len(wire), 3)
+    test.assert_eq(wire[0] as Int, 0x03)
+    test.assert_eq(wire[1] as Int, 0x0C)
+    test.assert_eq(wire[2] as Int, 0)
+    match hci_codec.decode_command(wire)
+        Err(_)   => test.fail("what encode wrote, decode reads")
+        Ok(back) => test.assert_eq(back.opcode, 0x0C03)
+
+@test
+fn test_a_command_shorter_than_its_header_is_refused()
+    match hci_codec.decode_command([0x03 as u8])
+        Ok(_)  => test.fail("one byte is not a command")
+        Err(e) =>
+            match e
+                TooShort(have, need) =>
+                    test.assert_eq(have, 1)
+                    test.assert_eq(need, 3)
+                _                    => test.fail("a short buffer is TooShort")
+
+@test
+fn test_an_event_round_trips_through_its_wire_bytes()
+    let evt = HciEvent { code: 0x0E, params: [0x01 as u8, 0x03 as u8, 0x0C as u8, 0x00 as u8] }
+    let wire = hci_codec.encode_event(evt)
+    test.assert_eq(list.len(wire), 6)
+    test.assert_eq(wire[0] as Int, 0x0E)
+    test.assert_eq(wire[1] as Int, 4)
+    match hci_codec.decode_event(wire)
+        Err(_)   => test.fail("what encode wrote, decode reads")
+        Ok(back) => test.assert_eq(back.code, 0x0E)
+
+@test
+fn test_a_command_complete_names_the_opcode_it_answers()
+    let evt = HciEvent { code: 0x0E, params: [0x01 as u8, 0x03 as u8, 0x0C as u8, 0x00 as u8] }
+    match hci_codec.command_complete_opcode(evt)
+        None     => test.fail("a HciCommand Complete carries the opcode at params[1..2]")
+        Some(op) => test.assert_eq(op, 0x0C03)
+    match hci_codec.command_complete_status(evt)
+        None    => test.fail("this one carries a status byte")
+        Some(s) => test.assert_eq(s, 0x00)
+
+@test
+fn test_an_acl_fragment_keeps_its_handle_and_boundary()
+    let acl = AclData {
+        handle: 0x0040,
+        boundary: FirstFlushable,
+        broadcast: 0,
+        payload: [0xAA as u8, 0xBB as u8] }
+    let wire = hci_codec.encode_acl(acl)
+    // Two header bytes of handle-and-flags, two of length, two of body.
+    test.assert_eq(list.len(wire), 6)
+    match hci_codec.decode_acl(wire)
+        Err(_)   => test.fail("what encode wrote, decode reads")
+        Ok(back) =>
+            test.assert_eq(back.handle, 0x0040)
+            test.assert_eq(list.len(back.payload), 2)
+
+@test
+fn test_decode_refuses_a_layer_this_package_does_not_code()
+    // 0x03 is SCO: a legal H4 type byte, and not one of the three.
+    match hci_codec.decode([0x03 as u8, 0x00 as u8, 0x00 as u8, 0x00 as u8])
+        Ok(_)  => test.fail("SCO is not coded here")
+        Err(e) =>
+            match e
+                UnsupportedPacketType(_) => test.assert(true)
+                _                        => test.fail("the refusal names the packet type")
+
+@test
+fn test_a_fed_packet_comes_straight_back_out()
+    let d = hci_codec.deframer()
+    test.assert_eq(hci_codec.pending_len(d), 0)
+    let step = hci_codec.feed(d, reset_framed())
+    match step.packet
+        None    => test.fail("a whole packet was fed")
+        Some(p) => test.assert_eq(list.len(p), 4)
+
+@test
+fn test_a_packet_fed_one_byte_at_a_time_arrives_on_the_last()
+    var d = hci_codec.deframer()
+    let framed = reset_framed()
+    var seen = 0
+    for i in 0..4
+        let step = hci_codec.feed_byte(d, framed[i] as Int)
+        d = step.deframer
+        match step.packet
+            None    => test.assert(true)
+            Some(_) =>
+                seen = seen + 1
+    test.assert_eq(seen, 1)
+
+@test
+fn test_a_second_packet_stays_in_until_it_is_taken()
+    let d = hci_codec.deframer()
+    let two = list.append(reset_framed(), reset_framed())
+    let first = hci_codec.feed(d, two)
+    match first.packet
+        None    => test.fail("the first packet is whole")
+        Some(_) => test.assert(true)
+    // feed drains one; take is what gets the other.
+    test.assert_eq(hci_codec.pending_len(first.deframer), 4)
+    let second = hci_codec.take(first.deframer)
+    match second.packet
+        None    => test.fail("the second packet was buffered")
+        Some(p) => test.assert_eq(list.len(p), 4)
+
+// ── `drain` has no test here, and the reason is filed ───────────────
+//
+// The two tests that belonged here instantiated
+// `hci_codec.drain(deframer(), Captured { … })` and asserted the thing
+// this package's `core` claim rests on: that `drain`'s `[e]` resolves
+// to NOTHING against `impl ByteSource[] for Captured`, so a caller over
+// a buffer declares no row.
+//
+// They do not compile.  Calling an effect-polymorphic function from
+// another module specialises it, and the specialised copy keeps `[e]`
+// in its effect clause while losing the `<S: ByteSource[e]>` bound that
+// bound it — `effect error: 'e' is not an effect: function
+// 'drain_Captured' declares [e]` [E3005], pointing at src/hci_codec.nv.
+// It is `effect-polymorphic-fn-loses-its-bound-when-monomorphised-across-modules`,
+// filed against the toolchain from this lane, with a two-module repro
+// and the same program in one file as the contrast.
+//
+// `drain` stays in the interface with its row unchanged.  The shape is
+// the one `docs/publishing.md` calls the direct one for a core package
+// taking a stream from its host, and a package that dropped it to make
+// its own test file compile would be reporting the defect as a design.
+// `Captured` and its impl stay too: declaring `impl ByteSource[] for
+// Captured` compiles today, so the trait's half of the claim is
+// checked here and only the call is missing.

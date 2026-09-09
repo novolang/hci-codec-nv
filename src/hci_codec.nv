@@ -1,0 +1,355 @@
+// hci_codec — the Bluetooth HCI packet codec, with no radio attached.
+//
+// Every body is a `todo()`.  The signatures and the effect rows are the
+// design, and the compiler checks them as claims; see the README for
+// the stamp.
+//
+// Core Vol 4 Part E is the packet layer — commands, events and ACL data
+// — and Vol 4 Part A § 2 is H4, the one-byte type prefix that lets the
+// three of them share a UART.  This package is both, and nothing else:
+// it turns bytes into packets and packets into bytes, and every
+// decision about what to DO with one belongs to the caller.
+//
+// All multi-byte fields are little-endian, which is HCI's convention
+// throughout.
+
+// ── H4 transport (Vol 4 Part A § 2) ─────────────────────────────────
+
+// Which of the four packet layers a byte stream is carrying.
+//
+// The names are the specification's.  `SyncData` and `IsoData` are here
+// because the type byte can hold them and a deframer has to say what it
+// saw; this package encodes and decodes neither, and `decode` refuses
+// them.
+pub enum PacketType
+    HciCommand
+    AclData
+    SyncData
+    HciEvent
+    IsoData
+
+// What a scan of a partial byte stream concluded.
+//
+// This is the deframer's arithmetic separated from its buffer, so a
+// caller with its own buffer can use the length rule without adopting
+// this package's state.  It replaces the sentinel integers the
+// hand-written stacks use — a negative length is a length, and this is
+// not.
+pub enum Scan
+    // The buffer holds a prefix of a packet and the length cannot be
+    // read yet, or can be read and more bytes are still due.
+    NeedMore
+    // The leading byte is not a packet type this transport carries.  A
+    // caller drops one byte and scans again; framing sync is the caller's
+    // loop, not this package's, because how far to drop is a policy
+    // question that depends on the link.
+    Resync
+    // A whole packet is at the front of the buffer, `length` bytes long
+    // INCLUDING the H4 type byte.
+    Complete(length: Int)
+
+// The H4 type byte for a packet layer.
+pub fn h4_type_byte(kind: PacketType) -> Int
+    todo("hci_codec.h4_type_byte")
+
+// The packet layer a leading H4 byte names, or `None` for a byte that
+// names none of them.
+pub fn h4_packet_type(byte: Int) -> ?PacketType
+    todo("hci_codec.h4_packet_type")
+
+// A complete packet with its H4 type byte in front.
+//
+// `packet` is the HCI packet WITHOUT a prefix — what `encode_command`,
+// `encode_event` and `encode_acl` return.
+pub fn h4_frame(kind: PacketType, packet: [u8]) -> [u8]
+    todo("hci_codec.h4_frame")
+
+// How much of the front of `buf` is one H4 packet.
+//
+// Reads the type byte and then the length field its layer puts at a
+// different offset and width — one byte at offset 3 for a command, one
+// at offset 2 for an event, two little-endian at offset 3 for ACL data.
+// It does not copy and it does not validate the body.
+pub fn h4_scan(buf: [u8]) -> Scan
+    todo("hci_codec.h4_scan")
+
+// ── Opcodes (Vol 4 Part E § 5.4.1) ──────────────────────────────────
+
+// The OGF of the link-control commands.
+pub const OGF_LINK_CONTROL = 0x01
+
+// The OGF of the controller and baseband commands.
+pub const OGF_CONTROLLER_BASEBAND = 0x03
+
+// The OGF of the informational-parameter commands.
+pub const OGF_INFORMATIONAL_PARAMETERS = 0x04
+
+// The OGF of the status-parameter commands.
+pub const OGF_STATUS_PARAMETERS = 0x05
+
+// The OGF every LE command sits under.
+pub const OGF_LE_CONTROLLER = 0x08
+
+// The OGF reserved for vendor commands.
+pub const OGF_VENDOR_SPECIFIC = 0x3F
+
+// A 16-bit opcode from its group and command fields.
+//
+// `ogf` is 6 bits and `ocf` is 10, packed as `ogf << 10 | ocf`.
+pub fn opcode(ogf: Int, ocf: Int) -> Int
+    todo("hci_codec.opcode")
+
+// The 6-bit group field of an opcode.
+pub fn opcode_ogf(op: Int) -> Int
+    todo("hci_codec.opcode_ogf")
+
+// The 10-bit command field of an opcode.
+pub fn opcode_ocf(op: Int) -> Int
+    todo("hci_codec.opcode_ocf")
+
+// ── Events (Vol 4 Part E § 7.7) ─────────────────────────────────────
+
+// Disconnection Complete.
+pub const EVT_DISCONNECTION_COMPLETE = 0x05
+
+// Encryption Change.
+pub const EVT_ENCRYPTION_CHANGE = 0x08
+
+// HciCommand Complete — carries the return parameters of a command.
+pub const EVT_COMMAND_COMPLETE = 0x0E
+
+// HciCommand Status — a command was accepted and its result comes later.
+pub const EVT_COMMAND_STATUS = 0x0F
+
+// Hardware Error.
+pub const EVT_HARDWARE_ERROR = 0x10
+
+// Number Of Completed Packets — the controller's flow-control credit.
+pub const EVT_NUMBER_OF_COMPLETED_PACKETS = 0x13
+
+// LE Meta HciEvent — every LE event arrives inside one, with a subevent
+// code as the first parameter byte.
+pub const EVT_LE_META_EVENT = 0x3E
+
+// ── Packets ─────────────────────────────────────────────────────────
+
+// A command: an opcode and its parameters.
+//
+// The length byte is not a field, because it is `params`' length and a
+// struct that carried both could disagree with itself.  `encode_command`
+// writes it.
+pub struct HciCommand
+    opcode: Int
+    params: [u8]
+
+// An event: a code and its parameters.
+//
+// For an LE meta event the subevent code is `params[0]`; this package
+// does not split it out, because doing so would mean knowing every LE
+// event's shape and that is the host stack's job.
+pub struct HciEvent
+    code: Int
+    params: [u8]
+
+// Where an ACL fragment sits in the L2CAP message it belongs to.
+//
+// `FirstFlushable` is what LE uses for the start of a message;
+// `FirstNonFlushable` is BR/EDR's, carried here so a decode of a
+// received packet can be honest about what arrived.
+pub enum Boundary
+    FirstNonFlushable
+    Continuation
+    FirstFlushable
+
+// An ACL data fragment.
+//
+// `handle` is 12 bits.  `broadcast` is 2 bits and is always 0 on LE;
+// it is a field rather than a constant so a decode does not silently
+// drop what a controller sent.
+pub struct AclData
+    handle: Int
+    boundary: Boundary
+    broadcast: Int
+    payload: [u8]
+
+// One HCI packet of any of the three layers this package codes.
+//
+// The variant is what the H4 type byte said, so a caller that deframed
+// a stream gets the layer and the contents from one `match` rather than
+// from a tag it has to carry alongside.
+pub enum Packet
+    Cmd(cmd: HciCommand)
+    Evt(evt: HciEvent)
+    Acl(acl: AclData)
+
+// Why a complete packet could not be read.
+//
+// None of these means "wait for more bytes" — that is `Scan.NeedMore`,
+// and it is a different type on purpose.  A `DecodeError` is a packet
+// that arrived whole and was wrong, which is a controller fault or a
+// framing loss and not a thing to wait out.
+pub enum DecodeError
+    // Fewer bytes than the layer's fixed header needs.
+    TooShort(have: Int, need: Int)
+    // The header's length field and the bytes actually present disagree.
+    LengthMismatch(declared: Int, actual: Int)
+    // A packet type this package does not code: SCO or ISO.
+    UnsupportedPacketType(kind: PacketType)
+
+// What went wrong, in words, for a caller that logs rather than
+// branches.
+//
+// `Result<_, DecodeError>` requires it: SPEC § 3.4 admits a `Result`
+// error type only if it implements `Error`.
+impl Error for DecodeError
+    fn message(self) -> Str
+        todo("hci_codec.DecodeError.message")
+
+// A command as its wire bytes, without an H4 prefix.
+//
+// Two bytes of little-endian opcode, one parameter-length byte, then the
+// parameters.
+pub fn encode_command(cmd: HciCommand) -> [u8]
+    todo("hci_codec.encode_command")
+
+// Read a command from its wire bytes, without an H4 prefix.
+pub fn decode_command(bytes: [u8]) -> Result<HciCommand, DecodeError>
+    todo("hci_codec.decode_command")
+
+// An event as its wire bytes, without an H4 prefix.
+//
+// One event-code byte, one parameter-length byte, then the parameters.
+pub fn encode_event(evt: HciEvent) -> [u8]
+    todo("hci_codec.encode_event")
+
+// Read an event from its wire bytes, without an H4 prefix.
+pub fn decode_event(bytes: [u8]) -> Result<HciEvent, DecodeError>
+    todo("hci_codec.decode_event")
+
+// An ACL fragment as its wire bytes, without an H4 prefix.
+//
+// Two bytes of little-endian handle-and-flags, two of little-endian
+// length, then the payload.
+pub fn encode_acl(acl: AclData) -> [u8]
+    todo("hci_codec.encode_acl")
+
+// Read an ACL fragment from its wire bytes, without an H4 prefix.
+pub fn decode_acl(bytes: [u8]) -> Result<AclData, DecodeError>
+    todo("hci_codec.decode_acl")
+
+// Read one whole H4 packet — type byte and all — into a `Packet`.
+//
+// This is what a caller pairs with the deframer: `take` hands back the
+// bytes of exactly one packet, and this turns them into the layer they
+// belong to.  Refuses `UnsupportedPacketType` for SCO and ISO.
+pub fn decode(framed: [u8]) -> Result<Packet, DecodeError>
+    todo("hci_codec.decode")
+
+// The opcode a HciCommand Complete event is reporting on, or `None` if the
+// event is not one or is too short to carry it.
+pub fn command_complete_opcode(evt: HciEvent) -> ?Int
+    todo("hci_codec.command_complete_opcode")
+
+// The status byte a HciCommand Complete event carries after the opcode,
+// or `None` when the event has no return parameters.
+pub fn command_complete_status(evt: HciEvent) -> ?Int
+    todo("hci_codec.command_complete_status")
+
+// ── The deframer ────────────────────────────────────────────────────
+//
+// A byte stream does not arrive in packets.  The deframer is the state
+// between "some bytes turned up" and "here is one packet": FEED it
+// whatever the transport handed you, then DRAIN it until it stops
+// producing.  It is a value, so a caller holds one per link and this
+// package holds nothing.
+
+// Bytes received and not yet handed back as a packet.
+//
+// Opaque: the field is here because a struct needs one, and a caller
+// that reaches into it has coupled itself to a buffering decision this
+// package intends to change.
+pub struct Deframer
+    pending: [u8]
+
+// A deframer and the one packet that came out of it, if one did.
+//
+// A struct rather than a tuple because a tuple's components come out
+// only through `match`, which reads badly for a value whose two halves
+// are used at different places — the caller reassigns one and dispatches
+// on the other.
+pub struct DeframeStep
+    deframer: Deframer
+    packet: ?[u8]
+
+// A deframer holding nothing.
+pub fn deframer() -> Deframer
+    todo("hci_codec.deframer")
+
+// Add bytes, and take a packet if the addition completed one.
+//
+// Drains ONE packet.  A feed that completes two — which a UART read of
+// any size can — leaves the second inside, and `take` is what gets it;
+// see `drain` for the loop written once.
+pub fn feed(d: Deframer, bytes: [u8]) -> DeframeStep
+    todo("hci_codec.feed")
+
+// Add one byte, and take a packet if it completed one.
+//
+// The shape an interrupt handler wants: it has a byte, not a slice, and
+// nothing to allocate to pass it.
+pub fn feed_byte(d: Deframer, byte: Int) -> DeframeStep
+    todo("hci_codec.feed_byte")
+
+// Take a packet if a whole one is already buffered, adding nothing.
+//
+// `packet` is `None` when the buffer holds a prefix, and the deframer
+// comes back unchanged.  On a leading byte that names no packet type
+// this drops that byte and returns `None`, so a caller that keeps
+// calling resynchronises without a rule of its own.
+pub fn take(d: Deframer) -> DeframeStep
+    todo("hci_codec.take")
+
+// How many bytes the deframer is holding.
+//
+// For a caller that bounds its own buffering: a link that has been
+// sent a truncated packet will sit on it forever, and this is how a
+// supervisor notices.
+pub fn pending_len(d: Deframer) -> Int
+    todo("hci_codec.pending_len")
+
+// ── Taking a stream from the host ───────────────────────────────────
+
+// A source of bytes, whatever it costs to read one.
+//
+// The effect parameter is the point (SPEC § 5.6): an implementation
+// over a UART supplies `[io]` or `[hw]`, one over a test buffer supplies
+// nothing, and `drain` below is charged whichever it was handed.  That
+// is what lets this package stay `core` while still offering the loop
+// its callers would otherwise each write.
+pub trait ByteSource[e]
+    // The next byte, or `None` when none is available right now.
+    //
+    // NOT "when the stream ended": a UART that has nothing this instant
+    // says `None` and may have a byte a microsecond later.  `drain`
+    // treats it as "stop for now", which is the only reading that works
+    // for both a socket and a peripheral.
+    fn read_byte(self) -> ?Int [e]
+
+// A deframer and every packet a drain produced.
+pub struct Drained
+    deframer: Deframer
+    packets: [[u8]]
+
+// Read from `src` until it has nothing, and return every whole packet.
+//
+// The effect row is the trait's parameter, so this function costs
+// exactly what the source costs and no more: `[io]` against a host's
+// UART, nothing against a buffer of captured bytes.  A `core` function
+// naming `[e]` has not spent an effect — it has said "whatever you hand
+// me".
+//
+// This is the ONLY function in the package with a row, and the only one
+// that could have had one.  Everything else takes bytes the caller
+// already holds.
+pub fn drain<S: ByteSource[e]>(d: Deframer, src: S) -> Drained [e]
+    todo("hci_codec.drain")
