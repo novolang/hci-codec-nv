@@ -1,6 +1,6 @@
 [package]
 name        = "hci-codec-nv"
-version     = "0.0.1"
+version     = "0.0.2"
 description = "The Bluetooth HCI packet codec with no radio attached: commands, events and ACL data to and from bytes, H4 framing, and a feed-and-drain deframer for a byte stream that does not arrive in packets.  Interface only — every body is a todo()."
 license     = "Apache-2.0"
 
@@ -22,6 +22,7 @@ category    = "networking"
 tags        = ["bluetooth", "ble", "hci", "h4", "codec", "deframer", "sans-io", "acl", "embedded"]
 repository  = "https://github.com/novolang/hci-codec-nv"
 maintainers = ["novo-lang"]
+novo        = ">= 0.8.9"
 
 [docs.pages]
 "README.md" = "HCI packets, without a radio"
