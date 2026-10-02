@@ -29,10 +29,17 @@
 
 use hci_codec
 
+// HCI_Reset's command header, opcode 0x0C03 and no parameters, in a
+// static buffer built once before `main`.  A list literal written inside
+// a function allocates when the function runs, which `@tier(embedded)`
+// refuses; one bound at module level is built once during
+// initialisation, and nothing is allocated after `main` starts.
+let RESET = [0x03 as u8, 0x0C as u8, 0x00 as u8]
+
 fn main() [hw]
     // The framing arithmetic, which is what a controller's receive path
     // spends its time in.
-    let framed = hci_codec.h4_frame(HciCommand, [0x03 as u8, 0x0C as u8, 0x00 as u8])
+    let framed = hci_codec.h4_frame(HciCommand, RESET)
     match hci_codec.h4_scan(framed)
         NeedMore    => hal.uart.write("hci-codec-nv: partial\n")
         Resync      => hal.uart.write("hci-codec-nv: resync\n")
