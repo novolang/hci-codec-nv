@@ -12,12 +12,6 @@ writes channels inside the ACL data packets this one carries. Below it
 is [ble-link-codec-nv](https://novo-lang.org/packages/ble-link-codec-nv),
 the link-layer packets a radio puts on the air.
 
-**Status: NOT IMPLEMENTED — interface only.** Every function is declared
-with its full signature, but every body is a `todo()` that panics when
-called. The package is published so its design can be reviewed and
-depended on before it is implemented. Version 0.1.0 will be the first
-working release.
-
 ## What HCI is
 
 A host asks its controller to do things by sending **commands**, and the
@@ -79,11 +73,12 @@ was in the buffer, which may be half a packet or two and a half. The
 one packet". It is a value the caller holds one of per link, so this
 package holds nothing of its own.
 
-This package performs no input or output. It reads no device, writes to
-no address and consults no clock. Every function is arithmetic over
-bytes the caller already holds, so the same code runs in a host stack on
-a laptop, in a controller's receive interrupt, and in a capture tool
-reading a file.
+This package performs no input or output of its own. It reads no device,
+writes to no address and consults no clock. Every function is arithmetic
+over bytes the caller already holds; `drain` is the exception, reading a
+byte source the caller passes in and costing whatever that source costs.
+So the same code runs in a host stack on a laptop, in a controller's
+receive interrupt, and in a capture tool reading a file.
 
 ## Install
 
@@ -123,10 +118,9 @@ fn main() [io]
                 Err(e)     => println("the packet is wrong: ${e.message()}")
 ```
 
-Build and test with `novo pkg build` and `novo test`. Today `novo test`
-fails on purpose: every test reaches a `not implemented: hci_codec.<fn>`
-panic. The tests are the specification the implementation will have to
-satisfy.
+Build and test with `novo pkg build` and `novo test`. `novo pkg build`
+type-checks the module and produces no binary, because a codec is a
+library; the tests are green.
 
 ## What the package contains
 
@@ -136,7 +130,7 @@ satisfy.
 
 ## How to choose an entry point
 
-There are three ways to get a packet out of incoming bytes, and they
+There are four ways to get a packet out of incoming bytes, and they
 differ in how much of the buffering you do yourself.
 
 **`h4_scan` reads only the length rule.** It answers how many bytes at
@@ -151,6 +145,13 @@ to packet boundaries. Keep one deframer per link.
 
 **`feed_byte` takes one byte.** It is the shape an interrupt handler
 has, with a byte in a register and nothing to allocate to pass it.
+
+**`drain` reads the source for you.** It pulls bytes from a
+`ByteSource` until one whole packet comes out, and answers the same
+`DeframeStep` the byte-at-a-time entry points answer. A caller with a
+stream to read loops until a call answers no packet. A device can use
+it as a host can, because it hands each packet back as it completes
+rather than collecting them.
 
 For turning bytes into a typed packet there are two levels. `decode`
 takes one whole H4 packet, type byte and all, and answers a `Packet`
@@ -196,9 +197,10 @@ which layer it has.
    7.7.14). Both answer `None` for an event that is not one or is too
    short.
 10. **`decode` refuses synchronous and isochronous data.** Both are
-    legal H4 type bytes, so the deframer will hand them to you, and
-    `decode` answers `UnsupportedPacketType` naming the type rather than
-    pretending the packet was malformed.
+    legal H4 type bytes, so `decode` answers `UnsupportedPacketType`
+    naming the layer rather than pretending the packet was malformed.
+    The deframer does not hold such a packet: `h4_scan` answers `Resync`
+    for those two type bytes, and `take` drops a byte at a time.
 11. **An ACL packet's `broadcast` field is always 0 on LE.** It is a
     field rather than a constant so that a decode reports what the
     controller actually sent (Core Vol 4 Part E section 5.4.2).
@@ -210,22 +212,42 @@ which layer it has.
 
 novo-lang lets a package state which of its modules can run on a device
 with no heap allocator, and the compiler checks that claim on every
-build. Here the claim covers the whole package. Every function is
-integer arithmetic over bytes the caller supplies, and the deframer's
-state is a value the caller owns rather than a buffer this package
-hides. `feed_byte` is the entry point on that path, because a byte
-arrives in a register and building a list to pass it would allocate.
+build. Here the claim covers the whole package, with nothing carved
+out: every module compiles for a Cortex-M, and `tests/embedded_probe.nv`
+builds one.
+
+Compiling for a device is not the same as allocating nothing, and one
+part of this package does allocate. The deframer buffers the bytes it
+has received and not yet answered with, and a buffer comes from the
+runtime's heap, which a device reserves at a fixed size. Feeding a byte
+copies the held bytes and the new one into a buffer sized exactly for
+the two, so a device that drives `feed_byte` allocates on every feed and
+sizes that heap for its longest packet. The build reports what it can
+prove and what it cannot: the init-time allocations exactly, and
+thirty-eight sites the compiler cannot bound.
+
+Nothing in this package may be called from an interrupt handler or a
+task body. Those are `@no_alloc` at this tier unless they say otherwise,
+and the build follows every call into a dependency and refuses the first
+thing that reaches the arena [E4005]. Here that is all of them:
+`feed_byte` through the deframer's buffer, `h4_scan` through the payload
+of `Complete`, and `h4_frame` through the buffer it builds.
+
+`feed_byte` still has the shape an interrupt handler wants, a byte in a
+register rather than a slice, and that is why it takes the value it
+does. An ISR that wants this package's framing reads its bytes into a
+buffer it owns and lets a context that may allocate do the framing.
 
 ```bash
-novo build --target=nrf52-qemu src/main.nv
+novo build --target=nrf52-qemu tests/embedded_probe.nv
 ```
 
 `tests/embedded_probe.nv` is that claim as a program that either builds
-or does not. **It does not build today.** The probe's own `main` builds
-a list literal to make a packet, and a list literal is a heap allocation
-the embedded tier refuses (`E4000`). The signatures the probe exercises
-are unchanged, and a caller that supplies bytes it already holds meets
-no such refusal.
+for a Cortex-M4 or does not. It builds, and it is not run: the probe's
+`main` has the shape a controller's receive path has, holding a command
+in a buffer built once before `main` and then running the framing
+arithmetic, the byte-at-a-time deframer and one decode, with nothing
+allocated to pass a byte.
 
 ## What is not included
 
@@ -243,16 +265,6 @@ no such refusal.
   Of Completed Packets event, and counting credits against it is the
   host stack's work. This package decodes the event and keeps no state
   about it.
-- **A working `drain`.** `drain` reads a `ByteSource` until it has
-  nothing and returns every packet. It declares whatever effects the
-  source declares, so it costs `[io]` against a host's serial port and
-  nothing against a buffer of captured bytes. It cannot be called
-  today. A call from another module specialises it, and the
-  specialised copy keeps the `[e]` in its effect clause while losing the
-  bound that bound it (`effect error: 'e' is not an effect` [E3005]).
-  Since a package's public function is by construction called from
-  another module, write the `feed` and `take` loop yourself until that
-  is fixed. The signature is published unchanged.
 - **A radio, a controller and a UART.** Bytes arrive as bytes and leave
   as bytes. Opening the port is the caller's work.
 
@@ -276,10 +288,13 @@ no such refusal.
 ## Tests
 
 ```bash
-novo test tests/hci_codec_tests.nv     # 17 tests against the signatures
+novo test tests/hci_codec_tests.nv       # 17 tests, the specification's byte strings
+novo test tests/hci_codec_edge_tests.nv  # 24 tests, the edges the API suite leaves
 ```
 
-The byte strings the suite asserts against are the Bluetooth Core
+Both suites are green, 41 tests in all.
+
+The byte strings the API suite asserts against are the Bluetooth Core
 Specification's own, Volume 4 Parts A and E: the section 2 H4 framing of
 HCI_Reset, the section 5.4.1 command header, the section 5.4.2 ACL
 header and the section 7.7.14 Command Complete event. The suite checks
@@ -289,28 +304,11 @@ byte asks to resynchronise, that each packet survives encoding and
 decoding, and that a second packet fed in one chunk stays buffered until
 it is taken.
 
-`drain` has no test. Calling it from a test module does not compile, for
-the defect named under "What is not included".
-
-The tests compile today and fail at run, each on the `not implemented:
-hci_codec.<fn>` panic that is its body. That is the expected state of an
-interface release. They turn green one at a time as bodies land.
-
-## Implementation status
-
-| Item | Implemented |
-| --- | --- |
-| The `OGF_*` and `EVT_*` constants | yes (they are constants) |
-| `hci_codec.h4_type_byte`, `.h4_packet_type`, `.h4_frame`, `.h4_scan` | no |
-| `hci_codec.opcode`, `.opcode_ogf`, `.opcode_ocf` | no |
-| `hci_codec.encode_command`, `.decode_command` | no |
-| `hci_codec.encode_event`, `.decode_event` | no |
-| `hci_codec.encode_acl`, `.decode_acl` | no |
-| `hci_codec.decode` | no |
-| `hci_codec.command_complete_opcode`, `.command_complete_status` | no |
-| `hci_codec.deframer`, `.feed`, `.feed_byte`, `.take`, `.pending_len` | no |
-| `hci_codec.drain` | no |
-| `hci_codec.DecodeError.message` | no |
+The edge suite takes what the API suite does not: every layer's type
+byte, the offset each layer's length field sits at, the guards that
+answer `None`, the text of a refusal, the boundary bits no round trip
+reaches, a leading byte that names no layer, and `drain` over a source
+of its own.
 
 ## Licence
 

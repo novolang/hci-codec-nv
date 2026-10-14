@@ -1,9 +1,5 @@
 // hci_codec — the Bluetooth HCI packet codec, with no radio attached.
 //
-// Every body is a `todo()`.  The signatures and the effect rows are the
-// design, and the compiler checks them as claims; see the README for
-// the stamp.
-//
 // Core Vol 4 Part E is the packet layer — commands, events and ACL data
 // — and Vol 4 Part A § 2 is H4, the one-byte type prefix that lets the
 // three of them share a UART.  This package is both, and nothing else:
@@ -50,19 +46,46 @@ pub enum Scan
 
 // The H4 type byte for a packet layer.
 pub fn h4_type_byte(kind: PacketType) -> Int
-    todo("hci_codec.h4_type_byte")
+    match kind
+        HciCommand => 0x01
+        AclData    => 0x02
+        SyncData   => 0x03
+        HciEvent   => 0x04
+        IsoData    => 0x05
 
 // The packet layer a leading H4 byte names, or `None` for a byte that
 // names none of them.
 pub fn h4_packet_type(byte: Int) -> ?PacketType
-    todo("hci_codec.h4_packet_type")
+    match byte
+        0x1 => Some(HciCommand)
+        0x2 => Some(AclData)
+        0x3 => Some(SyncData)
+        0x4 => Some(HciEvent)
+        0x5 => Some(IsoData)
+        _   => None
 
 // A complete packet with its H4 type byte in front.
 //
 // `packet` is the HCI packet WITHOUT a prefix — what `encode_command`,
 // `encode_event` and `encode_acl` return.
 pub fn h4_frame(kind: PacketType, packet: [u8]) -> [u8]
-    todo("hci_codec.h4_frame")
+    system
+        var out: [u8] = list.with_capacity(list.len(packet) + 1)
+        let _ = list.try_push(out, h4_type_byte(kind) as u8)
+        for b in packet
+            let _ = list.try_push(out, b)
+        return out
+
+// The scan of a buffer whose length field has been read: `need` bytes
+// are one packet, and a buffer that does not hold them all yet is still
+// waiting.  A length is only answered once every byte it counts is
+// there, so a caller that slices by it never runs off the end.
+fn scan_of(n: Int, need: Int) -> Scan
+    if n < need
+        return NeedMore
+    // A payload-carrying variant is a heap cell outside this block.
+    system
+        return Complete(need)
 
 // How much of the front of `buf` is one H4 packet.
 //
@@ -71,7 +94,31 @@ pub fn h4_frame(kind: PacketType, packet: [u8]) -> [u8]
 // at offset 2 for an event, two little-endian at offset 3 for ACL data.
 // It does not copy and it does not validate the body.
 pub fn h4_scan(buf: [u8]) -> Scan
-    todo("hci_codec.h4_scan")
+    let n = list.len(buf)
+    if n < 1
+        return NeedMore
+    match h4_packet_type(buf[0] as Int)
+        Some(HciCommand) =>
+            // One parameter-length byte at offset 3.
+            if n < 4
+                NeedMore
+            else
+                scan_of(n, 4 + buf[3] as Int)
+        Some(HciEvent)   =>
+            // One parameter-length byte at offset 2.
+            if n < 3
+                NeedMore
+            else
+                scan_of(n, 3 + buf[2] as Int)
+        Some(AclData)    =>
+            // Two little-endian length bytes at offset 3.
+            if n < 5
+                NeedMore
+            else
+                scan_of(n, 5 + (buf[3] as Int | (buf[4] as Int << 8)))
+        // The two layers this package carries the type byte for and no
+        // length rule for, and any byte that names no layer at all.
+        _                => Resync
 
 // ── Opcodes (Vol 4 Part E § 5.4.1) ──────────────────────────────────
 
@@ -97,15 +144,15 @@ pub const OGF_VENDOR_SPECIFIC = 0x3F
 //
 // `ogf` is 6 bits and `ocf` is 10, packed as `ogf << 10 | ocf`.
 pub fn opcode(ogf: Int, ocf: Int) -> Int
-    todo("hci_codec.opcode")
+    (ogf << 10) | ocf
 
 // The 6-bit group field of an opcode.
 pub fn opcode_ogf(op: Int) -> Int
-    todo("hci_codec.opcode_ogf")
+    (op >> 10) & 0x3F
 
 // The 10-bit command field of an opcode.
 pub fn opcode_ocf(op: Int) -> Int
-    todo("hci_codec.opcode_ocf")
+    op & 0x3FF
 
 // ── Events (Vol 4 Part E § 7.7) ─────────────────────────────────────
 
@@ -196,6 +243,16 @@ pub enum DecodeError
     // A packet type this package does not code: SCO or ISO.
     UnsupportedPacketType(kind: PacketType)
 
+// The words a log line gets for a packet layer this package does not
+// code.  A decode builds this refusal only for the two layers it
+// recognises and does not code, so the third arm is a shape no path
+// here reaches.
+fn unsupported_layer(kind: PacketType) -> Str
+    match kind
+        SyncData => "hci_codec: synchronous data is a layer this package does not code"
+        IsoData  => "hci_codec: isochronous data is a layer this package does not code"
+        _        => "hci_codec: a layer this package does not code"
+
 // What went wrong, in words, for a caller that logs rather than
 // branches.
 //
@@ -203,39 +260,207 @@ pub enum DecodeError
 // error type only if it implements `Error`.
 impl Error for DecodeError
     fn message(self) -> Str
-        todo("hci_codec.DecodeError.message")
+        // The text is built where a heap is allowed: the device build
+        // checks this body, and joining numbers into words allocates.
+        system
+            let text: Str = match self
+                TooShort(have, need)             => "hci_codec: ${have} of the ${need} bytes a header needs"
+                LengthMismatch(declared, actual) => "hci_codec: the length field declares ${declared} bytes and ${actual} arrived"
+                UnsupportedPacketType(kind)      => unsupported_layer(kind)
+            return text
 
 // A command as its wire bytes, without an H4 prefix.
 //
 // Two bytes of little-endian opcode, one parameter-length byte, then the
 // parameters.
 pub fn encode_command(cmd: HciCommand) -> [u8]
-    todo("hci_codec.encode_command")
+    system
+        var out: [u8] = list.with_capacity(3 + list.len(cmd.params))
+        let _ = list.try_push(out, (cmd.opcode & 0xFF) as u8)
+        let _ = list.try_push(out, ((cmd.opcode >> 8) & 0xFF) as u8)
+        let _ = list.try_push(out, list.len(cmd.params) as u8)
+        for b in cmd.params
+            let _ = list.try_push(out, b)
+        return out
 
 // Read a command from its wire bytes, without an H4 prefix.
 pub fn decode_command(bytes: [u8]) -> Result<HciCommand, DecodeError>
-    todo("hci_codec.decode_command")
+    let n = list.len(bytes)
+    let declared = if n < 3
+        0
+    else
+        bytes[2] as Int
+    system
+        if n < 3
+            return Err(TooShort(have: n, need: 3))
+        if n != 3 + declared
+            return Err(LengthMismatch(declared: declared, actual: n - 3))
+        var params: [u8] = list.with_capacity(declared)
+        for i in 3..n
+            let _ = list.try_push(params, bytes[i])
+        return Ok(HciCommand {
+            opcode: bytes[0] as Int | (bytes[1] as Int << 8),
+            params: params })
 
 // An event as its wire bytes, without an H4 prefix.
 //
 // One event-code byte, one parameter-length byte, then the parameters.
 pub fn encode_event(evt: HciEvent) -> [u8]
-    todo("hci_codec.encode_event")
+    system
+        var out: [u8] = list.with_capacity(2 + list.len(evt.params))
+        let _ = list.try_push(out, evt.code as u8)
+        let _ = list.try_push(out, list.len(evt.params) as u8)
+        for b in evt.params
+            let _ = list.try_push(out, b)
+        return out
 
 // Read an event from its wire bytes, without an H4 prefix.
 pub fn decode_event(bytes: [u8]) -> Result<HciEvent, DecodeError>
-    todo("hci_codec.decode_event")
+    let n = list.len(bytes)
+    let declared = if n < 2
+        0
+    else
+        bytes[1] as Int
+    system
+        if n < 2
+            return Err(TooShort(have: n, need: 2))
+        if n != 2 + declared
+            return Err(LengthMismatch(declared: declared, actual: n - 2))
+        var params: [u8] = list.with_capacity(declared)
+        for i in 2..n
+            let _ = list.try_push(params, bytes[i])
+        return Ok(HciEvent { code: bytes[0] as Int, params: params })
+
+// The two flag bits a boundary travels in, which are the numbers the
+// three values are declared in and the specification's own.
+fn boundary_bits(boundary: Boundary) -> Int
+    match boundary
+        FirstNonFlushable => '\0'
+        Continuation      => 0x01
+        FirstFlushable    => 0x02
+
+// The boundary two received flag bits name.  The fourth bit pattern is
+// reserved for BR/EDR, which has no LE meaning, and it is read as that
+// start rather than refused: a fragment that arrived whole is still a
+// fragment, and the caller sees a boundary it can act on.
+fn boundary_of(bits: Int) -> Boundary
+    if bits == 0x01
+        Continuation
+    else if bits == 0x02
+        FirstFlushable
+    else
+        FirstNonFlushable
 
 // An ACL fragment as its wire bytes, without an H4 prefix.
 //
 // Two bytes of little-endian handle-and-flags, two of little-endian
 // length, then the payload.
 pub fn encode_acl(acl: AclData) -> [u8]
-    todo("hci_codec.encode_acl")
+    // Handle in the low twelve bits, boundary above it, broadcast at
+    // the top of the little-endian word.
+    let word = (acl.handle & 0x0FFF)
+        | (boundary_bits(acl.boundary) << 12)
+        | ((acl.broadcast & 0x03) << 14)
+    let n = list.len(acl.payload)
+    system
+        var out: [u8] = list.with_capacity(4 + n)
+        let _ = list.try_push(out, (word & 0xFF) as u8)
+        let _ = list.try_push(out, ((word >> 8) & 0xFF) as u8)
+        let _ = list.try_push(out, (n & 0xFF) as u8)
+        let _ = list.try_push(out, ((n >> 8) & 0xFF) as u8)
+        for b in acl.payload
+            let _ = list.try_push(out, b)
+        return out
 
 // Read an ACL fragment from its wire bytes, without an H4 prefix.
 pub fn decode_acl(bytes: [u8]) -> Result<AclData, DecodeError>
-    todo("hci_codec.decode_acl")
+    let n = list.len(bytes)
+    let word = if n < 4
+        0
+    else
+        bytes[0] as Int | (bytes[1] as Int << 8)
+    let declared = if n < 4
+        0
+    else
+        bytes[2] as Int | (bytes[3] as Int << 8)
+    system
+        if n < 4
+            return Err(TooShort(have: n, need: 4))
+        if n != 4 + declared
+            return Err(LengthMismatch(declared: declared, actual: n - 4))
+        var payload: [u8] = list.with_capacity(declared)
+        for i in 4..n
+            let _ = list.try_push(payload, bytes[i])
+        return Ok(AclData {
+            handle: word & 0x0FFF,
+            boundary: boundary_of((word >> 12) & 0x03),
+            broadcast: (word >> 14) & 0x03,
+            payload: payload })
+
+// The bytes from `start` on, copied out one at a time: the embedded
+// tier has no slice, and a decoder takes a packet's own bytes alone.
+fn tail_from(buf: [u8], start: Int) -> [u8]
+    system
+        var out: [u8] = list.with_capacity(list.len(buf) - start)
+        for i in start..list.len(buf)
+            let _ = list.try_push(out, buf[i])
+        return out
+
+// The refusal a buffer that names no packet gets: one byte wanted and
+// none there.  An empty buffer and a byte that names no layer are the
+// same fault to a caller, and no `PacketType` exists to name the
+// second, so the two answer alike.
+fn no_packet() -> Result<Packet, DecodeError>
+    system
+        return Err(TooShort(have: 0, need: 1))
+
+// A refusal that a layer this package does not code carries its own
+// name, so a caller's log says which layer arrived.
+fn refuse_layer(kind: PacketType) -> Result<Packet, DecodeError>
+    system
+        return Err(UnsupportedPacketType(kind))
+
+// A decoded command as the packet a caller matches on, refusal and all.
+fn wrap_cmd(r: Result<HciCommand, DecodeError>) -> Result<Packet, DecodeError>
+    system
+        let p: Result<Packet, DecodeError> = match r
+            Ok(cmd) => Ok(Cmd(cmd))
+            Err(e)  => Err(e)
+        return p
+
+// A decoded event as the packet a caller matches on, refusal and all.
+fn wrap_evt(r: Result<HciEvent, DecodeError>) -> Result<Packet, DecodeError>
+    system
+        let p: Result<Packet, DecodeError> = match r
+            Ok(evt) => Ok(Evt(evt))
+            Err(e)  => Err(e)
+        return p
+
+// A decoded ACL fragment as the packet a caller matches on, refusal and
+// all.
+fn wrap_acl(r: Result<AclData, DecodeError>) -> Result<Packet, DecodeError>
+    system
+        let p: Result<Packet, DecodeError> = match r
+            Ok(acl) => Ok(Acl(acl))
+            Err(e)  => Err(e)
+        return p
+
+// A packet of the layer the leading byte named, read from the bytes
+// behind it.
+fn layer_packet(kind: PacketType, framed: [u8]) -> Result<Packet, DecodeError>
+    let body = tail_from(framed, 1)
+    match kind
+        HciCommand =>
+            let r: Result<HciCommand, DecodeError> = decode_command(body)
+            wrap_cmd(r)
+        HciEvent   =>
+            let r: Result<HciEvent, DecodeError> = decode_event(body)
+            wrap_evt(r)
+        AclData    =>
+            let r: Result<AclData, DecodeError> = decode_acl(body)
+            wrap_acl(r)
+        _          =>
+            refuse_layer(kind)
 
 // Read one whole H4 packet — type byte and all — into a `Packet`.
 //
@@ -243,17 +468,30 @@ pub fn decode_acl(bytes: [u8]) -> Result<AclData, DecodeError>
 // bytes of exactly one packet, and this turns them into the layer they
 // belong to.  Refuses `UnsupportedPacketType` for SCO and ISO.
 pub fn decode(framed: [u8]) -> Result<Packet, DecodeError>
-    todo("hci_codec.decode")
+    let n = list.len(framed)
+    if n < 1
+        return no_packet()
+    match h4_packet_type(framed[0] as Int)
+        Some(kind) => layer_packet(kind, framed)
+        None       => no_packet()
 
 // The opcode a HciCommand Complete event is reporting on, or `None` if the
 // event is not one or is too short to carry it.
 pub fn command_complete_opcode(evt: HciEvent) -> ?Int
-    todo("hci_codec.command_complete_opcode")
+    if evt.code != EVT_COMMAND_COMPLETE
+        return None
+    if list.len(evt.params) < 3
+        return None
+    Some(evt.params[1] as Int | (evt.params[2] as Int << 8))
 
 // The status byte a HciCommand Complete event carries after the opcode,
 // or `None` when the event has no return parameters.
 pub fn command_complete_status(evt: HciEvent) -> ?Int
-    todo("hci_codec.command_complete_status")
+    if evt.code != EVT_COMMAND_COMPLETE
+        return None
+    if list.len(evt.params) < 4
+        return None
+    Some(evt.params[3] as Int)
 
 // ── The deframer ────────────────────────────────────────────────────
 //
@@ -281,9 +519,67 @@ pub struct DeframeStep
     deframer: Deframer
     packet: ?[u8]
 
+// The answer when the buffer holds a prefix of a packet: nothing taken
+// and nothing dropped, because a packet still on its way is not a fault.
+fn waiting_step(rest: [u8]) -> DeframeStep
+    system
+        return DeframeStep { deframer: Deframer { pending: rest }, packet: None }
+
+// The answer when the front byte names no layer: that one byte goes and
+// the rest is kept, so a caller that takes again resynchronises without
+// a rule of its own.  One byte per call, because how far to drop is a
+// policy question that depends on the link.
+fn resync_step(buf: [u8]) -> DeframeStep
+    system
+        var rest: [u8] = list.with_capacity(list.len(buf) - 1)
+        for i in 1..list.len(buf)
+            let _ = list.try_push(rest, buf[i])
+        return DeframeStep { deframer: Deframer { pending: rest }, packet: None }
+
+// The answer when a whole packet is at the front: the packet is copied
+// out and the bytes behind it stay for the next take.
+fn packet_step(buf: [u8], size: Int) -> DeframeStep
+    system
+        var packet: [u8] = list.with_capacity(size)
+        for i in 0..size
+            let _ = list.try_push(packet, buf[i])
+        var rest: [u8] = list.with_capacity(list.len(buf) - size)
+        for i in size..list.len(buf)
+            let _ = list.try_push(rest, buf[i])
+        return DeframeStep { deframer: Deframer { pending: rest }, packet: Some(packet) }
+
+// The held bytes and the new ones as one buffer, copied byte by byte:
+// the embedded tier has no concatenation, and a feed has to keep
+// whatever an earlier feed left.
+fn with_bytes(pending: [u8], bytes: [u8]) -> [u8]
+    system
+        var out: [u8] = list.with_capacity(list.len(pending) + list.len(bytes))
+        for b in pending
+            let _ = list.try_push(out, b)
+        for b in bytes
+            let _ = list.try_push(out, b)
+        return out
+
+// One byte as a buffer, which is what a feed of a single byte has to
+// become before the same scan can read it.
+fn one_byte(byte: Int) -> [u8]
+    system
+        var out: [u8] = list.with_capacity(1)
+        let _ = list.try_push(out, byte as u8)
+        return out
+
+// One scan and one answer, whichever way the bytes got here: a feed and
+// a take differ only in the buffer they hand this.
+fn step_of(buf: [u8]) -> DeframeStep
+    match h4_scan(buf)
+        NeedMore       => waiting_step(buf)
+        Resync         => resync_step(buf)
+        Complete(size) => packet_step(buf, size)
+
 // A deframer holding nothing.
 pub fn deframer() -> Deframer
-    todo("hci_codec.deframer")
+    system
+        return Deframer { pending: [] }
 
 // Add bytes, and take a packet if the addition completed one.
 //
@@ -291,14 +587,14 @@ pub fn deframer() -> Deframer
 // any size can — leaves the second inside, and `take` is what gets it;
 // see `drain` for the loop written once.
 pub fn feed(d: Deframer, bytes: [u8]) -> DeframeStep
-    todo("hci_codec.feed")
+    step_of(with_bytes(d.pending, bytes))
 
 // Add one byte, and take a packet if it completed one.
 //
 // The shape an interrupt handler wants: it has a byte, not a slice, and
 // nothing to allocate to pass it.
 pub fn feed_byte(d: Deframer, byte: Int) -> DeframeStep
-    todo("hci_codec.feed_byte")
+    step_of(with_bytes(d.pending, one_byte(byte)))
 
 // Take a packet if a whole one is already buffered, adding nothing.
 //
@@ -307,7 +603,7 @@ pub fn feed_byte(d: Deframer, byte: Int) -> DeframeStep
 // this drops that byte and returns `None`, so a caller that keeps
 // calling resynchronises without a rule of its own.
 pub fn take(d: Deframer) -> DeframeStep
-    todo("hci_codec.take")
+    step_of(d.pending)
 
 // How many bytes the deframer is holding.
 //
@@ -315,7 +611,7 @@ pub fn take(d: Deframer) -> DeframeStep
 // sent a truncated packet will sit on it forever, and this is how a
 // supervisor notices.
 pub fn pending_len(d: Deframer) -> Int
-    todo("hci_codec.pending_len")
+    list.len(d.pending)
 
 // ── Taking a stream from the host ───────────────────────────────────
 
@@ -335,12 +631,15 @@ pub trait ByteSource[e]
     // for both a socket and a peripheral.
     fn read_byte(self) -> ?Int [e]
 
-// A deframer and every packet a drain produced.
-pub struct Drained
-    deframer: Deframer
-    packets: [[u8]]
-
-// Read from `src` until it has nothing, and return every whole packet.
+// Pull from `src` until one whole packet comes out, and answer it.
+//
+// It streams, one packet per call, which is what keeps it on the device
+// tier: a packet is handed back as it completes rather than collected,
+// so nothing here grows and nothing is allocated.  A caller that wants
+// the whole source loops until a call answers no packet, and the step
+// it gets back is the same `DeframeStep` the byte-at-a-time entry
+// points answer.  `feed_byte` and `take` are that loop written by hand,
+// for a caller that would rather own it.
 //
 // The effect row is the trait's parameter, so this function costs
 // exactly what the source costs and no more: `[io]` against a host's
@@ -351,5 +650,20 @@ pub struct Drained
 // This is the ONLY function in the package with a row, and the only one
 // that could have had one.  Everything else takes bytes the caller
 // already holds.
-pub fn drain<S: ByteSource[e]>(d: Deframer, src: S) -> Drained [e]
-    todo("hci_codec.drain")
+pub fn drain<S: ByteSource[e]>(d: Deframer, src: S) -> DeframeStep [e]
+    var cur = d
+    var source = src
+    while true
+        match source.read_byte()
+            None    =>
+                // The source has nothing right now, so answer what the
+                // bytes already held amount to.  A packet that completed
+                // without a further byte is still handed back.
+                return take(cur)
+            Some(b) =>
+                let step: DeframeStep = feed_byte(cur, b)
+                cur = step.deframer
+                match step.packet
+                    None    => ()
+                    Some(_) =>
+                        return step

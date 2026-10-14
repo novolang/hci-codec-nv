@@ -12,20 +12,15 @@
 // that could not compile for the first would not be worth splitting out
 // of the stack.
 //
-// It BUILDS; it does not run.  Every function it calls is a `todo()`
-// today, so a device that executed this would panic on the first line
-// of `main`.  What is being checked is the tier: `--target=nrf52-qemu`
-// stamps `@tier(embedded)` on every function it compiles, so the
-// checker walks the module and refuses a `Str` concatenation, a `Bytes`
-// call or an unbounded `while` wherever the implementation later puts
-// one.
+// It BUILDS; it does not run.  What is being checked is the tier:
+// `--target=nrf52-qemu` stamps `@tier(embedded)` on every function it
+// compiles, so the checker walks the module and refuses a `Str`
+// concatenation, a `Bytes` call or an unbounded `while` wherever one
+// appears.
 //
-// `drain` is deliberately not called here.  It is generic, so calling
-// it would specialise it, and a specialised effect-polymorphic function
-// does not compile today
-// (`effect-polymorphic-fn-loses-its-bound-when-monomorphised-across-modules`).
-// The byte-at-a-time path below is what an interrupt handler would use
-// anyway.
+// `drain` is not called here: it takes a `ByteSource`, and a probe with
+// a static buffer and no radio has none to hand it.  The byte-at-a-time
+// path below is the shape an interrupt handler has anyway.
 
 use hci_codec
 

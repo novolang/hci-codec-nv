@@ -1,0 +1,375 @@
+// tests/hci_codec_edge_tests.nv — the edges the API suite leaves.
+//
+// tests/hci_codec_tests.nv walks the main paths on the specification's
+// own byte strings; this file takes what it does not: every layer's
+// type byte, the length rule of the two layers it exercises on one, the
+// guards that answer `None`, the text of a refusal, the boundary bits
+// that no round trip reaches, a leading byte that names no layer, and
+// `drain` over a source of its own.
+
+use std.test
+use hci_codec
+
+// A byte source that consumes a buffer: it answers the byte at its
+// cursor and then stops.  The receiver is `var self` because a source
+// that advances writes to itself, which the trait admits and `drain`
+// takes.
+struct Buffered
+    bytes: [u8]
+    var at: Int
+
+impl ByteSource[] for Buffered
+    fn read_byte(var self) -> ?Int
+        if self.at >= list.len(self.bytes)
+            return None
+        let b = self.bytes[self.at] as Int
+        self.at = self.at + 1
+        Some(b)
+
+@test
+fn test_the_type_byte_and_the_layer_round_trip_for_all_five()
+    let kinds: [PacketType] = [HciCommand, AclData, SyncData, HciEvent, IsoData]
+    for k in kinds
+        match hci_codec.h4_packet_type(hci_codec.h4_type_byte(k))
+            None       => test.fail("a layer's own type byte names it")
+            Some(back) => test.assert(back == k)
+
+@test
+fn test_a_scan_of_an_empty_buffer_asks_for_more()
+    match hci_codec.h4_scan([])
+        NeedMore    => test.assert(true)
+        Resync      => test.fail("an empty buffer has no leading byte")
+        Complete(_) => test.fail("no bytes are no packet")
+
+@test
+fn test_a_scan_of_a_command_whose_parameters_are_not_all_there_asks_for_more()
+    // Four bytes are the whole header and the length byte says four more
+    // follow.  A length is answered only once every byte it counts is in
+    // the buffer, so a caller that slices by it stays inside.
+    match hci_codec.h4_scan([0x01 as u8, 0x03 as u8, 0x0C as u8, 0x04 as u8])
+        NeedMore    => test.assert(true)
+        Resync      => test.fail("0x01 is a legal type byte")
+        Complete(_) => test.fail("the four parameter bytes are not there")
+
+@test
+fn test_a_scan_reads_an_event_s_length_at_offset_two()
+    // The code and no length byte yet.
+    match hci_codec.h4_scan([0x04 as u8, 0x0E as u8])
+        NeedMore    => test.assert(true)
+        Resync      => test.fail("0x04 is a legal type byte")
+        Complete(_) => test.fail("two bytes carry no length")
+    // The length byte, with the four parameters still due.
+    match hci_codec.h4_scan([0x04 as u8, 0x0E as u8, 0x04 as u8])
+        NeedMore    => test.assert(true)
+        Resync      => test.fail("0x04 is a legal type byte")
+        Complete(_) => test.fail("the four parameter bytes are not there")
+    // The whole event: seven bytes.
+    match hci_codec.h4_scan([
+        0x04 as u8, 0x0E as u8, 0x04 as u8,
+        0x01 as u8, 0x03 as u8, 0x0C as u8, 0x00 as u8])
+        NeedMore    => test.fail("seven bytes are the whole event")
+        Resync      => test.fail("0x04 is a legal type byte")
+        Complete(n) => test.assert_eq(n, 7)
+
+@test
+fn test_a_scan_reads_an_acl_length_as_two_little_endian_bytes()
+    // Three bytes of a five-byte header: the length cannot be read yet.
+    match hci_codec.h4_scan([0x02 as u8, 0x40 as u8, 0x20 as u8])
+        NeedMore    => test.assert(true)
+        Resync      => test.fail("0x02 is a legal type byte")
+        Complete(_) => test.fail("the length bytes are not both there")
+    // The whole fragment: handle 0x0040, boundary 0b10, two bytes of
+    // payload.
+    match hci_codec.h4_scan([
+        0x02 as u8, 0x40 as u8, 0x20 as u8, 0x02 as u8, 0x00 as u8,
+        0xAA as u8, 0xBB as u8])
+        NeedMore    => test.fail("seven bytes are the whole fragment")
+        Resync      => test.fail("0x02 is a legal type byte")
+        Complete(n) => test.assert_eq(n, 7)
+
+@test
+fn test_a_command_with_parameters_survives_its_wire_bytes()
+    let cmd = HciCommand { opcode: 0x0C03, params: [0x01 as u8, 0x02 as u8, 0x03 as u8] }
+    let wire = hci_codec.encode_command(cmd)
+    test.assert_eq(list.len(wire), 6)
+    // The parameter-length byte is written from `params`, never set.
+    test.assert_eq(wire[2] as Int, 3)
+    match hci_codec.decode_command(wire)
+        Err(_)   => test.fail("what encode wrote, decode reads")
+        Ok(back) =>
+            test.assert_eq(list.len(back.params), 3)
+            test.assert_eq(back.params[2] as Int, 0x03)
+
+@test
+fn test_a_command_whose_length_field_disagrees_with_its_bytes_is_refused()
+    // The header's length byte says five and no parameter byte follows.
+    match hci_codec.decode_command([0x03 as u8, 0x0C as u8, 0x05 as u8])
+        Ok(_)  => test.fail("three bytes cannot hold five parameter bytes")
+        Err(e) =>
+            match e
+                LengthMismatch(declared, actual) =>
+                    test.assert_eq(declared, 5)
+                    test.assert_eq(actual, 0)
+                _                                => test.fail("a disagreeing length is LengthMismatch")
+
+@test
+fn test_an_event_shorter_than_its_header_is_refused()
+    match hci_codec.decode_event([0x0E as u8])
+        Ok(_)  => test.fail("one byte is not an event")
+        Err(e) =>
+            match e
+                TooShort(have, need) =>
+                    test.assert_eq(have, 1)
+                    test.assert_eq(need, 2)
+                _                    => test.fail("a short buffer is TooShort")
+
+@test
+fn test_an_event_whose_length_field_disagrees_with_its_bytes_is_refused()
+    // The length byte says four and one parameter byte follows it.
+    match hci_codec.decode_event([0x0E as u8, 0x04 as u8, 0x01 as u8])
+        Ok(_)  => test.fail("three bytes cannot hold four parameters")
+        Err(e) =>
+            match e
+                LengthMismatch(declared, actual) =>
+                    test.assert_eq(declared, 4)
+                    test.assert_eq(actual, 1)
+                _                                => test.fail("a disagreeing length is LengthMismatch")
+
+@test
+fn test_every_boundary_survives_the_round_trip()
+    let kinds: [Boundary] = [FirstNonFlushable, Continuation, FirstFlushable]
+    for b in kinds
+        let acl = AclData {
+            handle: 0x0040,
+            boundary: b,
+            broadcast: 0,
+            payload: [0xAA as u8] }
+        match hci_codec.decode_acl(hci_codec.encode_acl(acl))
+            Err(_)   => test.fail("what encode wrote, decode reads")
+            Ok(back) => test.assert(back.boundary == b)
+
+@test
+fn test_a_continuation_fragment_decodes_with_its_boundary()
+    // Handle 0x0001 with the continuation bits 0b01 above it, and one
+    // byte of payload: a middle fragment of an L2CAP message.
+    match hci_codec.decode_acl([
+        0x01 as u8, 0x10 as u8, 0x01 as u8, 0x00 as u8, 0xEE as u8])
+        Err(_)   => test.fail("this fragment is whole")
+        Ok(back) =>
+            test.assert_eq(back.handle, 0x0001)
+            match back.boundary
+                Continuation => test.assert(true)
+                _            => test.fail("the flag bits name a continuation")
+
+@test
+fn test_the_reserved_boundary_bits_read_as_that_start()
+    // 0b11 is reserved for BR/EDR and has no LE meaning.  A fragment
+    // that arrived whole is read as a start rather than refused.
+    match hci_codec.decode_acl([0x00 as u8, 0x30 as u8, 0x00 as u8, 0x00 as u8])
+        Err(_)   => test.fail("a four-byte header with no payload is whole")
+        Ok(back) =>
+            match back.boundary
+                FirstNonFlushable => test.assert(true)
+                _                 => test.fail("the reserved bits read as that start")
+
+@test
+fn test_a_fragment_shorter_than_its_header_is_refused()
+    match hci_codec.decode_acl([0x40 as u8, 0x00 as u8, 0x02 as u8])
+        Ok(_)  => test.fail("three bytes are not an ACL header")
+        Err(e) =>
+            match e
+                TooShort(have, need) =>
+                    test.assert_eq(have, 3)
+                    test.assert_eq(need, 4)
+                _                    => test.fail("a short buffer is TooShort")
+
+@test
+fn test_a_fragment_whose_length_field_disagrees_with_its_bytes_is_refused()
+    // The header declares two payload bytes and one follows.
+    match hci_codec.decode_acl([
+        0x40 as u8, 0x00 as u8, 0x02 as u8, 0x00 as u8, 0xAA as u8])
+        Ok(_)  => test.fail("five bytes cannot hold two payload bytes")
+        Err(e) =>
+            match e
+                LengthMismatch(declared, actual) =>
+                    test.assert_eq(declared, 2)
+                    test.assert_eq(actual, 1)
+                _                                => test.fail("a disagreeing length is LengthMismatch")
+
+@test
+fn test_decode_names_the_layer_of_a_framed_packet()
+    match hci_codec.decode([0x01 as u8, 0x03 as u8, 0x0C as u8, 0x00 as u8])
+        Err(_) => test.fail("a framed reset is whole")
+        Ok(p)  =>
+            match p
+                Cmd(cmd) => test.assert_eq(cmd.opcode, 0x0C03)
+                _        => test.fail("the type byte said command")
+    match hci_codec.decode([
+        0x04 as u8, 0x0E as u8, 0x04 as u8,
+        0x01 as u8, 0x03 as u8, 0x0C as u8, 0x00 as u8])
+        Err(_) => test.fail("a framed command complete is whole")
+        Ok(p)  =>
+            match p
+                Evt(evt) => test.assert_eq(evt.code, 0x0E)
+                _        => test.fail("the type byte said event")
+    match hci_codec.decode([
+        0x02 as u8, 0x40 as u8, 0x20 as u8, 0x02 as u8, 0x00 as u8,
+        0xAA as u8, 0xBB as u8])
+        Err(_) => test.fail("a framed fragment is whole")
+        Ok(p)  =>
+            match p
+                Acl(acl) => test.assert_eq(acl.handle, 0x0040)
+                _        => test.fail("the type byte said ACL data")
+
+@test
+fn test_decode_passes_a_body_refusal_through()
+    // Each type byte is legal and each body is wrong: the refusal has to
+    // be the body's own, not one made up at the framing layer.
+    match hci_codec.decode([0x01 as u8, 0x03 as u8, 0x0C as u8, 0x05 as u8])
+        Ok(_)  => test.fail("the command's length field disagrees")
+        Err(e) =>
+            match e
+                LengthMismatch(_, _) => test.assert(true)
+                _                    => test.fail("the body's refusal comes through")
+    match hci_codec.decode([0x04 as u8, 0x0E as u8, 0x04 as u8, 0x01 as u8])
+        Ok(_)  => test.fail("the event's length field disagrees")
+        Err(e) =>
+            match e
+                LengthMismatch(_, _) => test.assert(true)
+                _                    => test.fail("the body's refusal comes through")
+    match hci_codec.decode([
+        0x02 as u8, 0x40 as u8, 0x20 as u8, 0x02 as u8, 0x00 as u8, 0xAA as u8])
+        Ok(_)  => test.fail("the fragment's length field disagrees")
+        Err(e) =>
+            match e
+                LengthMismatch(_, _) => test.assert(true)
+                _                    => test.fail("the body's refusal comes through")
+
+@test
+fn test_decode_refuses_a_buffer_that_names_no_packet()
+    // No bytes at all, and a leading byte that names no layer.  Both are
+    // the same fault to a caller and no PacketType exists to name the
+    // second, so both answer with the least a packet needs.
+    match hci_codec.decode([])
+        Ok(_)  => test.fail("no bytes are no packet")
+        Err(e) =>
+            match e
+                TooShort(have, need) =>
+                    test.assert_eq(have, 0)
+                    test.assert_eq(need, 1)
+                _                    => test.fail("a buffer that names no packet is TooShort")
+    match hci_codec.decode([0x77 as u8, 0x00 as u8])
+        Ok(_)  => test.fail("0x77 is not an H4 packet type")
+        Err(e) =>
+            match e
+                TooShort(_, _) => test.assert(true)
+                _              => test.fail("0x77 names no layer to refuse by name")
+
+@test
+fn test_a_refusal_says_what_is_wrong()
+    match hci_codec.decode_command([0x03 as u8])
+        Ok(_)  => test.fail("one byte is not a command")
+        Err(e) => test.assert(e.message() == "hci_codec: 1 of the 3 bytes a header needs")
+    match hci_codec.decode_event([0x0E as u8, 0x04 as u8, 0x01 as u8])
+        Ok(_)  => test.fail("the event's length field disagrees")
+        Err(e) =>
+            test.assert(e.message() ==
+                "hci_codec: the length field declares 4 bytes and 1 arrived")
+
+@test
+fn test_a_refusal_names_the_layer_it_refused()
+    match hci_codec.decode([0x03 as u8, 0x00 as u8, 0x00 as u8, 0x00 as u8])
+        Ok(_)  => test.fail("SCO is not coded here")
+        Err(e) =>
+            test.assert(e.message() ==
+                "hci_codec: synchronous data is a layer this package does not code")
+    match hci_codec.decode([0x05 as u8, 0x00 as u8, 0x00 as u8, 0x00 as u8])
+        Ok(_)  => test.fail("ISO is not coded here")
+        Err(e) =>
+            test.assert(e.message() ==
+                "hci_codec: isochronous data is a layer this package does not code")
+    // A caller can build the refusal with a layer this package does
+    // code; it still answers a sentence.
+    let odd = UnsupportedPacketType(HciCommand)
+    test.assert(odd.message() == "hci_codec: a layer this package does not code")
+
+@test
+fn test_a_command_complete_that_is_not_one_answers_none()
+    let other = HciEvent {
+        code: 0x05,
+        params: [0x01 as u8, 0x02 as u8, 0x03 as u8, 0x00 as u8] }
+    match hci_codec.command_complete_opcode(other)
+        None    => test.assert(true)
+        Some(_) => test.fail("only a Command Complete names an opcode")
+    match hci_codec.command_complete_status(other)
+        None    => test.assert(true)
+        Some(_) => test.fail("only a Command Complete carries a status")
+
+@test
+fn test_a_command_complete_with_no_return_parameters_answers_none()
+    // Two parameter bytes carry no opcode.
+    let short = HciEvent { code: 0x0E, params: [0x01 as u8, 0x03 as u8] }
+    match hci_codec.command_complete_opcode(short)
+        None    => test.assert(true)
+        Some(_) => test.fail("two parameter bytes carry no opcode")
+    // Three carry the opcode and no status byte after it.
+    let no_status = HciEvent {
+        code: 0x0E,
+        params: [0x01 as u8, 0x03 as u8, 0x0C as u8] }
+    match hci_codec.command_complete_status(no_status)
+        None    => test.assert(true)
+        Some(_) => test.fail("the status byte is the fourth parameter")
+
+@test
+fn test_take_drops_the_byte_that_names_no_layer_and_keeps_the_rest()
+    // A junk byte and then the first byte of a command: the take drops
+    // the junk, holds what follows, and answers no packet.
+    let step = hci_codec.feed(hci_codec.deframer(), [0x77 as u8, 0x01 as u8])
+    match step.packet
+        None    => test.assert(true)
+        Some(_) => test.fail("0x77 completes no packet")
+    test.assert_eq(hci_codec.pending_len(step.deframer), 1)
+    // What is held is a prefix of a command, which is not a fault.
+    let again = hci_codec.take(step.deframer)
+    match again.packet
+        None    => test.assert(true)
+        Some(_) => test.fail("one byte is not a whole command")
+    test.assert_eq(hci_codec.pending_len(again.deframer), 1)
+
+@test
+fn test_drain_streams_one_packet_per_call_until_the_source_is_dry()
+    // Two resets in one buffer.  A drain hands back one packet per
+    // call, so the caller loops: the third call finds the source dry
+    // and answers no packet, holding nothing behind it.
+    let src = Buffered {
+        bytes: [
+            0x01 as u8, 0x03 as u8, 0x0C as u8, 0x00 as u8,
+            0x01 as u8, 0x03 as u8, 0x0C as u8, 0x00 as u8],
+        at: 0 }
+
+    var step = hci_codec.drain(hci_codec.deframer(), src)
+    match step.packet
+        None    => test.fail("the first reset completed")
+        Some(p) => test.assert_eq(list.len(p), 4)
+
+    step = hci_codec.drain(step.deframer, src)
+    match step.packet
+        None    => test.fail("the second reset completed")
+        Some(p) => test.assert_eq(list.len(p), 4)
+
+    step = hci_codec.drain(step.deframer, src)
+    match step.packet
+        None    => test.assert(true)
+        Some(_) => test.fail("two resets came out of two resets")
+    test.assert_eq(hci_codec.pending_len(step.deframer), 0)
+
+@test
+fn test_drain_keeps_a_packet_whose_rest_never_arrives()
+    // Three of the four reset bytes: the source ends and the prefix
+    // stays buffered, for a supervisor to notice through `pending_len`.
+    let src = Buffered { bytes: [0x01 as u8, 0x03 as u8, 0x0C as u8], at: 0 }
+    let step = hci_codec.drain(hci_codec.deframer(), src)
+    match step.packet
+        None    => test.assert(true)
+        Some(_) => test.fail("three of four bytes are not a whole packet")
+    test.assert_eq(hci_codec.pending_len(step.deframer), 3)

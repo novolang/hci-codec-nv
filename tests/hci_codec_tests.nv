@@ -1,16 +1,5 @@
 // tests/hci_codec_tests.nv — the API tests, written against the
 // signatures.
-//
-// They COMPILE today and they FAIL at run, with `not implemented:
-// hci_codec.<fn>` from the `todo()` that is each body.  That is the
-// expected state of an interface release: the compiler has checked
-// every signature, every type and every effect row, and nothing else
-// has been checked because there is nothing else yet.
-//
-// One test that belongs here is absent, and the block at the bottom of
-// the file says which and why: the claim that `drain`'s `[e]` resolves
-// to nothing against a pure impl cannot be written down today, for a
-// toolchain defect filed from this lane.
 
 use std.test
 use hci_codec
@@ -33,8 +22,6 @@ fn reset_framed() -> [u8]
 
 @test
 fn test_the_opcode_groups_are_the_specification_s()
-    // Real today: the constants are the one part of an interface that
-    // needs no body.
     test.assert_eq(hci_codec.OGF_LINK_CONTROL, 0x01)
     test.assert_eq(hci_codec.OGF_CONTROLLER_BASEBAND, 0x03)
     test.assert_eq(hci_codec.OGF_LE_CONTROLLER, 0x08)
@@ -202,28 +189,3 @@ fn test_a_second_packet_stays_in_until_it_is_taken()
     match second.packet
         None    => test.fail("the second packet was buffered")
         Some(p) => test.assert_eq(list.len(p), 4)
-
-// ── `drain` has no test here, and the reason is filed ───────────────
-//
-// The two tests that belonged here instantiated
-// `hci_codec.drain(deframer(), Captured { … })` and asserted the thing
-// this package's `core` claim rests on: that `drain`'s `[e]` resolves
-// to NOTHING against `impl ByteSource[] for Captured`, so a caller over
-// a buffer declares no row.
-//
-// They do not compile.  Calling an effect-polymorphic function from
-// another module specialises it, and the specialised copy keeps `[e]`
-// in its effect clause while losing the `<S: ByteSource[e]>` bound that
-// bound it — `effect error: 'e' is not an effect: function
-// 'drain_Captured' declares [e]` [E3005], pointing at src/hci_codec.nv.
-// It is `effect-polymorphic-fn-loses-its-bound-when-monomorphised-across-modules`,
-// filed against the toolchain from this lane, with a two-module repro
-// and the same program in one file as the contrast.
-//
-// `drain` stays in the interface with its row unchanged.  The shape is
-// the one `docs/publishing.md` calls the direct one for a core package
-// taking a stream from its host, and a package that dropped it to make
-// its own test file compile would be reporting the defect as a design.
-// `Captured` and its impl stay too: declaring `impl ByteSource[] for
-// Captured` compiles today, so the trait's half of the claim is
-// checked here and only the call is missing.
