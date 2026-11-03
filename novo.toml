@@ -17,7 +17,7 @@ category    = "networking"
 tags        = ["bluetooth", "ble", "hci", "h4", "codec", "deframer", "sans-io", "acl", "embedded"]
 repository  = "https://github.com/novolang/hci-codec-nv"
 maintainers = ["novo-lang"]
-novo        = ">= 0.20.2"
+novo        = ">= 0.23.0"
 
 [docs.pages]
 "README.md" = "HCI packets, without a radio"

@@ -60,6 +60,8 @@ And `drain` is called from another module by the new suite, because the
 specialised copy now keeps the bound that binds its `[e]`: so `drain`
 has tests after all.
 
+This release requires novo 0.23.0 or later.
+
 ## 0.0.4 — 2026-10-10
 
 The **interface**, corrected. `drain` answers a `DeframeStep` rather
