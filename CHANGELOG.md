@@ -4,6 +4,11 @@ Every published version, newest first. This file is on the publish
 allow-list, so it travels with the package: it is the only thing a
 consumer deciding whether to upgrade can read.
 
+## 0.1.1 — 2026-11-09
+
+Withdrawn: The HCI packet codec moved into noble-hci; the noble stack builds on it.  `novo pkg add hci-codec-nv` now refuses and names `noble-hci`; a project that already depends on this
+package keeps building.  No source changed.
+
 ## 0.1.0 — 2026-10-10
 
 The **implementation**. Every body the 0.0.4 interface published is

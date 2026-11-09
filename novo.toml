@@ -1,6 +1,6 @@
 [package]
 name        = "hci-codec-nv"
-version     = "0.1.0"
+version     = "0.1.1"
 description = "The Bluetooth HCI packet codec with no radio attached: commands, events and ACL data to and from bytes, H4 framing, and a feed-and-drain deframer for a byte stream that does not arrive in packets."
 license     = "Apache-2.0"
 
@@ -26,3 +26,7 @@ novo        = ">= 0.23.0"
 # None.  A codec over `[u8]` needs the language and nothing else, which
 # is the property that lets it sit under both a host stack and a
 # controller.
+
+[withdrawn]
+replaced_by = "noble-hci"
+reason      = "The HCI packet codec moved into noble-hci; the noble stack builds on it."
